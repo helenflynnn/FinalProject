@@ -1,0 +1,126 @@
+---
+title: "ChatGPT Analysis of Mean Discharge in a River"
+author: "Helen Flynn"
+date: "2023-01-23"
+output: html_document
+---
+
+# ChatGPT, the analyst
+
+For this assignment you will be asking ChatGPT to conduct an analysis of mean river
+discharge for any river station in the USA. You can use the Poudre River in 
+Fort Collins if you want, but I encourage you to find other USGS stations that 
+you are interested in. This assignment will have three prompts for ChatGPT, and
+you will need to troubleshoot this code for each prompt. The prompts are:
+
+1. *Using R, Download daily discharge data for XX river in YY city from 1990-2022 (you pick the river and 
+the city).* You can choose to provide ChatGPT with an actual USGS station ID which 
+will produce less errors, or you can see how well it figures out station ids 
+(its bad at this for some reason). You may also need to provide it with specific
+package recommendations (as I do in the videos).
+
+2. How would I take the summertime (June 21 - Sept 21) annual mean of this data and plot it
+with year on the x-axis and summertime mean flow on the y axis.
+
+3. How would I Use a linear model to determine if summer annual mean discharge is
+changing? 
+
+4 (Bonus). Why might a linear model be a poor choice for this analysis? 
+
+
+## Data Download
+
+To download daily discharge data for the Sheboygan River near Sheboygan, Wisconsin city from 1990-2022 using R, you can use the dataRetrieval package. The first step is to install and load the package:
+```{r}
+library(dataRetrieval)
+library(lubridate)
+library(tidyverse)
+```
+
+
+Next, you can use the readNWISdv() function to download the data. You will need to specify the siteNumber for the location, the parameterCd for discharge, and the date range for which you want to retrieve data.
+```{r}
+siteNumber <- "04086000"
+parameterCd <- "00060"
+start_date <- as.Date("1990-01-01")
+end_date <- as.Date("2022-12-31")
+
+discharge_data <- readNWISdv(siteNumber = "04086000",
+                             parameterCd = "00060",
+                             startDate = start_date,
+                             endDate = end_date)
+head(discharge_data)
+```
+
+
+## Data analysis and visualization
+
+
+```{r}
+discharge_data$Date <- as.Date(discharge_data$Date)
+```
+
+# create a new column 'year'
+
+```{r}
+discharge_data$year <- as.numeric(format(discharge_data$Date, "%Y"))
+```
+
+# filter the data to include only June 21 - Sept 21
+
+```{r}
+summer_data <- discharge_data %>%
+    filter(month(Date) >= 6 & month(Date) <= 9 & day(Date) >= 21)
+```
+
+# group the data by year and calculate the mean discharge for each year
+
+```{r}
+summer_mean_flow <- summer_data %>%
+    group_by(year) %>%
+    summarise(mean_flow = mean(X_00060_00003))
+```
+
+# plot the data
+
+```{r}
+ggplot(summer_mean_flow, aes(x = year, y = mean_flow)) +
+    geom_line()
+```
+
+
+This will create a scatter plot with year on the x-axis and summertime mean flow on the y-axis.
+
+## Model output
+To use a linear model to determine if summer annual mean discharge is changing, you can use the following steps:
+
+Use the lm() function to fit a linear model to the summer annual mean discharge data:
+```{r}
+model <- lm(mean_flow ~ year, data = summer_mean_flow)
+
+```
+
+This will fit a linear model with year as the predictor variable and mean_flow as the response variable.
+
+Use the summary() function to obtain a summary of the model:
+```{r}
+summary(model)
+```
+
+This will return the coefficient of determination (R-squared), the coefficients of the predictor variable, the standard errors of the coefficients, and the p-values for the coefficients.
+
+Use the coef() function to get the coefficient for the predictor variable (year):
+```{r}
+coef(model)
+```
+
+This will give you the slope of the linear model (the coefficient for the predictor variable). If this coefficient is positive and statistically significant (p-value < 0.05), it suggests that summer annual mean discharge is increasing over time. If the coefficient is negative, it suggests that summer annual mean discharge is decreasing over time.
+
+You can use the ggplot() function to plot the model and check how well the model is fitting the data.
+```{r}
+ggplot(summer_mean_flow, aes(x = year, y = mean_flow)) +
+  geom_point() +
+  geom_line(aes(y = predict(model)), color = "red")
+```
+
+## Bonus - why linear models are dangerous time-series analysis tools. 

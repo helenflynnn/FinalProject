@@ -1,0 +1,359 @@
+---
+title: "Modelling Public Water Quality Data"
+author: "Helen Flynn"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc:  yes
+    toc_depth:  3
+    toc_float: true
+editor_options: 
+  chunk_output_type: console
+---
+
+# Final data prep
+
+We have a 'tidy' data set from our previous work that includes both discharge data and concentration data. Let's look it! But first, where is the data? 
+
+```{r setup, warnings = 'hide', message = FALSE}
+library(tidyverse) # Package with dplyr, tibble, readr, and others to help clean coding
+library(dataRetrieval) # Package to download data. 
+library(sf) # Geospatial package to plot and explore data
+library(mapview) # Simple interface to leaflet interactive maps
+library(broom) # Simplifies model outputs
+library(knitr) # Makes nice tables
+library(kableExtra) # Makes even nicer tables
+library(lubridate) # Makes working with dates easier
+library(ggthemes) # Makes plots prettier
+library(tidyr) # Makes multiple simultaneous models easier
+library(trend) # Allows us to explore trends. 
+```
+
+## Data load
+
+```{r data readin}
+load('data/Q.RData')
+load('data/tidied_full_wq.RData')
+
+## Site info so we can use names rather than long site codes
+colorado <- tibble(SiteID = c('USGS-09034500', 'USGS-09069000',
+                           'USGS-09085000','USGS-09095500', 'USGS-09152500'),
+                   basin = c('colorado1', 'eagle',
+                           'roaring', 'colorado3', 'gunnison')) %>%
+  bind_rows(tibble(SiteID = c('USGS-09180000', 'USGS-09180500', 'USGS-09380000'),
+                          basin = c('dolores', 'colorado4', 'colorado5'))
+)
+
+# Grab the basin name
+wq <- tidiedfull %>%
+  inner_join(colorado)
+```
+
+## Site info extraction
+
+With all our data transformations in the previous .Rmd we lost a lot of the metadata for each site. We need to re-download this data using `whatWQPdata()`
+
+```{r}
+site.info <- whatWQPsites(siteid = unique(wq$SiteID)) %>%
+  dplyr::select(SiteID = MonitoringLocationIdentifier,
+                  name = MonitoringLocationName,
+                  area = DrainageAreaMeasure.MeasureValue,
+                  area.units = DrainageAreaMeasure.MeasureUnitCode,
+                  elev = VerticalMeasure.MeasureValue,
+                  elev_units = VerticalMeasure.MeasureUnitCode,
+                  lat = LatitudeMeasure,
+                  long = LongitudeMeasure) %>%
+  distinct() %>%  # Distinct without any arguments just keeps the first of any duplicates rows 
+  # join this data to our `colorado` object to get the `basin` column:
+  inner_join(colorado)
+```
+
+### Map
+
+Here we use the `sf` package to project the site information data into a GIS type data object called a `simple feature (sf)`. The function `st_as_sf` converts the longitude (x) and latitude (y) coordinates into a projected point feature with the EPSG code 4326 (WGS 84). (See Lesson 1 and Lesson 4 for a more detailed explanation.) We can then use the `mapview` package and function to look at where these sites are. 
+
+```{r}
+# convert site info as an sf object
+site.sf <- site.info %>%
+  st_as_sf(.,coords = c('long', 'lat'), crs = 4326)
+
+mapview(site.sf)
+```
+
+So these sites are generally in the Colorado River Basin with increasing size. 
+
+# Modelling Data
+
+## Trend detection?
+
+Now that we know where the data is coming from and we are happy with what it looks like, let's start modelling! The first question we might want to explore is: **Are concentrations of elements changing over time?**. Let's first focus on calcium in the Dolores River. As with all data work, the first thing you should do is look at our data. 
+
+```{r}
+dolores_ca <- wq %>%
+  filter(basin == 'dolores', parameter == 'Calcium') 
+
+ggplot(dolores_ca, aes(x = date, y = conc)) + 
+  geom_point()
+```
+
+## Adding a trend line with ggplot
+
+`ggplot()` has an easy method for adding a trend line to plots (`stat_smooth`()). The
+code below uses a linear model (lm) to fit the line:
+
+```{r}
+
+ggplot(dolores_ca, aes(x = date, y = conc)) + 
+  geom_point() + 
+  stat_smooth(method = 'lm')
+
+
+```
+
+That line looks pretty flat!
+
+### Linear models for trend detection (the wrong way). 
+
+A very intuitive way to try to detect if there is a long term trend is to use linear models, as `ggplot()` does. So, let's go ahead and write out a model for daily calcium data using the `lm()` function. This class won't do a great job defining when you can use linear models, but this is one of the main functions that you will use. Your stats classes should give you more background on how to  use `lm()` appropriately. 
+
+```{r}
+ca_model <- lm(conc ~ date, data = dolores_ca)
+summary(ca_model)
+```
+
+### The right way!
+
+Using a linear model for trend detection breaks one of the cardinal rules of linear modelling, namely that each observation is assumed to be independent of any other observation. In a time-series like what we are looking at here, yesterday's calcium concentration is highly correlated with today's concentration. So linear models should never be used in trend detection. Instead we should use Mann-Kendall tests and Tau's Sens Slope. 
+
+#### Mann-Kendall test
+
+The Mann Kendall test is a non-parametric test of trends, you can use `?mk.test` to read more about the method, but it only requires an ordered time-series to run. Let's use it here. 
+
+```{r}
+dolores_ca <- dolores_ca %>%
+  # Make sure data is arranged from 1980 onward. 
+  arrange(date)
+
+dolores_mk <- mk.test(dolores_ca$conc)
+
+print(dolores_mk)
+```
+
+The mk.test is really just a true/false where if the p-value is below some threshold (usually 0.05) then you can be mostly confident that there is a 'real' trend in the data. However it doesn't tell you the slope of that trend. For that you need to use `sens.slope()`. 
+
+```{r}
+dolores_slope <- sens.slope(dolores_ca$conc)
+```
+
+Notice that `sens.slope()` gives you a slope value, and a p-value (which is the same as an MK test). For this reason, I almost always just use `sens.slope()` so I get both significance and slope.
+
+#### Cleaner output
+
+The output from these models is kind of messy if you are printing lots of model results. We can use the `tidy()` function from the `broom` package to clean up this output. 
+
+```{r}
+tidy(dolores_slope)
+```
+
+Some model objects don't include both the p-value and the slope, which is slightly maddening, but we can make our own function to do this. 
+
+```{r}
+tidier <- function(mod = dolores_slope){
+  
+  tidy(mod) %>%
+    mutate(slope = mod$estimates)
+  
+}
+
+tidier(mod = dolores_slope)
+```
+
+Ok, now we have an elaborate way to confirm what the plot already showed us. There is no long-term trend in calcium concentrations in the Dolores River. 
+
+# Models everywhere!
+
+Okay so we have already figured out how to model data at a single site for a single parameter, but is there an efficient way to do this for ALL sites
+and ALL parameters? 
+
+**YES!**
+
+I'm glad you asked. We will use the magic of `nesting` data to apply our trend models to all our data. First let's alter the data a little to increase precision in our question. 
+
+### Converting data to late summer annual means
+
+Water chemistry is heavily controlled by seasonality and water flow, so let's try to control for that and summarize our data to only include the low-flow periods of the year. Basically we will be focusing on: **are there trends in low flow concentrations of ions in the stream?**
+
+```{r}
+low_flow <- wq %>%
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>%
+  filter(month %in% c(8,9,10,11)) %>%
+  group_by(basin, SiteID, parameter, year) %>%
+  summarize(conc = median(conc, na.rm = T))
+
+ggplot(low_flow, aes(x = year, y = conc, color = basin)) + 
+  facet_wrap(~parameter, scales = 'free') + 
+  geom_point() + 
+  theme_few() + 
+  scale_y_log10() + 
+  scale_color_hc() + 
+  theme(legend.pos = c(0.7,0.2),
+        legend.direction = 'horizontal') +
+  ylab('Concentration (mg/l)')
+```
+
+## The Magic of Nesting
+
+Okay, so now we have a few things:
+
+  1. A dataset that has the data organized the way we want it.
+  
+  2. A function (`sens.slope()`) we can use to look at if there are long-term
+  trends in concentration. 
+  
+  3. A desire to apply this function to all of our sites and parameters.
+  
+To accomplish **3** we need to use the magic of `nest()`. Nesting allows us to group data by site and parameter (like with a `group_by` and a `summarize`) and apply models to each site and parameter separately. Effectively nesting bundles (or nests!) the data into tidy little packets that we can apply the model to. Let's try!
+
+### Nesting data
+
+```{r}
+low_nest <- low_flow %>%
+  # rename parameter as ion to make it more clear
+  group_by(ion = parameter,basin) %>%
+  nest() 
+
+head(low_nest)
+```
+
+The above code produces a tibble with three columns: `basin`, `parameter`, and `data`. The `data` column is our nested data (or 'bundled' data, as I like to think of it) for each basin-parameter combination.
+
+### Modelling over nested data
+
+Now we just need to apply our model to the data. To do this we need to use the `map()` function. Map takes in an x (here, our `data` column) and then a function (in this case `sens.slope()`). We use `.x$conc` to indicate that we want to apply the model to the concentration column within each bundled (nested) data frame. 
+
+```{r}
+wq_models <- low_nest %>%
+  mutate(mods = map(data, ~ sens.slope(.x$conc)))
+
+head(wq_models)
+```
+
+Now we have a nested data set AND nested models (that are hard to see). We can look at a single model by indexing it. 
+
+```{r}
+# This provides the 15th model summary
+wq_models$mods[15]
+```
+
+But that is a tedious way to look at our model summaries!
+
+So now let's use the power of our `tidier()` function and `unnest()`. Again, we use `map()` to apply our `tidier()` function to all of the raw `sens.slope` models, and we extract p.value and slope in a clean table. We then use `unnest()` to unravel that data so we have a final data frame that contains all of the model outputs. 
+
+```{r}
+wq_mod_summaries <- wq_models %>%
+  mutate(tidy_mods = map(mods, tidier)) %>%
+  unnest(tidy_mods) %>%
+  select(basin, ion, p.value, slope) %>%
+  mutate(trend = ifelse(p.value < 0.01, 'yes', 'no'))
+
+head(wq_mod_summaries)
+```
+
+### Visualizing model output. 
+
+```{r}
+ggplot(wq_mod_summaries,aes(x = ion, y = slope, color = trend)) + 
+  geom_point() + 
+  facet_wrap(~basin,scales = 'free') + 
+  theme_few() + 
+  scale_color_manual(values = c('black','green3')) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.pos = c(0.8, 0.1))
+```
+
+# Assignment
+
+The above workflow really focuses on trend detection, but we want to focus some on actual linear models. As such we want to join our discharge (Q) data to our water quality (WQ) data and we want to look at the relationship between Q and WQ. 
+
+## Join discharge and water quality data.
+
+Use `inner_join()` to join our discharge data to our water quality data. You want to join by both date and siteid. Remember! the discharge data has ids that drop the `USGS-` so you will need to add that back in using a `paste()`. 
+
+```{r}
+wq$SiteID <- gsub('USGS-', '', wq$SiteID)
+
+tot_wat <- wq %>% 
+  rename(site_no = SiteID, Date = date) %>% 
+  inner_join(waterdat, by = c("site_no", "Date"))
+```
+
+Pick any site and ion combination and plot Q versus concentration. What do you see in this relationship? 
+
+```{r}
+gunnison_hco3 <- tot_wat %>%
+  filter(basin == 'gunnison', parameter == 'Bicarbonate') 
+
+ggplot(gunnison_hco3, aes(x = Flow, y = conc)) + 
+  geom_point()+
+  scale_x_log10()
+```
+
+Group your data by basin and ion and nest the data, use the `head()` function to print the first several rows of your nested data
+
+```{r}
+tot_nest <- tot_wat %>%
+  mutate(log_flow = log10(Flow)) %>% 
+  group_by(ion = parameter,basin) %>%
+  nest() 
+
+head(tot_nest)
+```
+
+## Apply a linear model to the data.
+
+You will need to use a `map()` command like this: `map(data, ~lm(conc ~ q, data = .x))`
+
+```{r}
+tot_models <- tot_nest %>%
+  mutate(mod = map(data, ~lm(conc ~ log_flow, data = .x)))
+         
+head(tot_models)
+```
+
+Summarize your data using `tidy()`. You should have a new column called `mods` or something similar and you need to "tidy" those mods. 
+
+```{r}
+tidier_lm <- function(wq_mod = tot_models$mod[[1]]){
+  tidier_mod <- tidy(wq_mod) %>% 
+    mutate(r_squared = summary(wq_mod)$adj.r.squared)
+}
+
+tot_mod_summaries <- tot_models %>%
+  mutate(tidy_out = map(mod, tidier_lm)) %>%
+  unnest(tidy_out) %>% 
+  select(-data, -mod) %>% 
+  mutate(trend = ifelse(r_squared > 0.6, 'yes', 'no'))
+```
+
+## Visualize the data.
+
+Make a visual of your model summaries that shows a) which sites have significant relationships between discharge and concentration, and b) the slope of that relationship. 
+
+```{r}
+ggplot(tot_mod_summaries,aes(x = ion, y = r_squared, color = trend)) + 
+  geom_point() + 
+  facet_wrap(~basin,scales = 'free') + 
+  theme_few() + 
+  scale_color_manual(values = c('black','green3')) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.pos = c(0.8, 0.1))
+
+#I decided that r_squared values above 0.6 were significant
+```
+
+## Bonus
+
+Look up the `furrr` package. What does `furrr::map()` do that is different from `purrr::map()`?
+
+When would you want to use this `furrr::` function instead of `purrr::`?
