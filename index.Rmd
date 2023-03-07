@@ -1,0 +1,18 @@
+---
+title: "FinalBookdown"
+author: "Helen Flynn"
+date: "`r Sys.Date()`"
+site: bookdown::bookdown_site
+output: bookdown::gitbook
+documentclass: book
+description: "This is a compilation of some of the R work I completed during my final semester of my undergrad."
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction {-}
+
+This is a compilation of some of the R work I completed during my final semester of my undergrad.
+
